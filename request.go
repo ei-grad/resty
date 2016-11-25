@@ -6,6 +6,7 @@ package resty
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
@@ -46,6 +47,7 @@ type Request struct {
 	outputFile       string
 	proxyURL         *url.URL
 	multipartFiles   []*File
+	ctx              context.Context
 }
 
 // SetHeader method is to set a single header field and its value in the current request.
@@ -377,6 +379,16 @@ func (r *Request) SetProxy(proxyURL string) *Request {
 	return r
 }
 
+// SetContext method sets the context.Context for current Request. It allows to
+// interrupt the request execution (via CancelRequest() transport call) if
+// ctx.Done() channel is closed.
+// See https://blog.golang.org/context article and the "context" package
+// documentation.
+func (r *Request) SetContext(ctx context.Context) *Request {
+	r.ctx = ctx
+	return r
+}
+
 //
 // HTTP verb method starts here
 //
@@ -421,6 +433,7 @@ func (r *Request) Patch(url string) (*Response, error) {
 // 		resp, err := resty.R().Execute(resty.GET, "http://httpbin.org/get")
 //
 func (r *Request) Execute(method, url string) (*Response, error) {
+
 	if r.isMultiPart && !(method == POST || method == PUT) {
 		return nil, fmt.Errorf("Multipart content is not allowed in HTTP verb [%v]", method)
 	}
@@ -428,24 +441,58 @@ func (r *Request) Execute(method, url string) (*Response, error) {
 	r.Method = method
 	r.URL = url
 
-	if r.client.RetryCount == 0 {
-		return r.client.execute(r)
-	}
+	var (
+		resp      *Response
+		err       error
+		cancelled = false
+	)
 
-	var resp *Response
-	var err error
-	attempt := 0
-	_ = Backoff(func() (*Response, error) {
-		attempt++
-		resp, err = r.client.execute(r)
-		if err != nil {
-			r.client.Log.Printf("ERROR [%v] Attempt [%v]", err, attempt)
+	execute := func() {
+
+		if r.client.RetryCount == 0 {
+			resp, err = r.client.execute(r)
+			return
 		}
 
-		return resp, err
-	}, Retries(r.client.RetryCount), RetryConditions(r.client.RetryConditions))
+		attempt := 0
+		_ = Backoff(func() (*Response, error) {
+			attempt++
+			// resp and err are defined in Execute scope
+			resp, err = r.client.execute(r)
+			if err != nil {
+				r.client.Log.Printf("ERROR [%v] Attempt [%v]", err, attempt)
+			}
+			if cancelled {
+				// stop Backoff from retrying request
+				return resp, nil
+			}
+			// this return is needed for Backoff
+			return resp, err
+		}, Retries(r.client.RetryCount), RetryConditions(r.client.RetryConditions))
+	}
 
-	return resp, err
+	if r.ctx != nil {
+		c := make(chan struct{}, 1)
+		go func() {
+			defer func() {
+				c <- struct{}{}
+			}()
+			execute()
+		}()
+		select {
+		case <-r.ctx.Done():
+			cancelled = true
+			r.client.transport.CancelRequest(r.RawRequest)
+			<-c // Wait for execute() to return.
+			return resp, r.ctx.Err()
+		case <-c:
+			return resp, err
+		}
+	} else {
+		execute()
+		return resp, err
+	}
+
 }
 
 func (r *Request) fmtBodyString() (body string) {

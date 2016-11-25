@@ -6,6 +6,7 @@ package resty
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -1402,6 +1403,23 @@ func TestClientOptions(t *testing.T) {
 	assertEqual(t, DefaultClient.closeConnection, true)
 
 	SetLogger(ioutil.Discard)
+}
+
+func TestSetContext(t *testing.T) {
+	ts := createGetServer(t)
+	defer ts.Close()
+
+	resp, err := R().
+		SetContext(context.Background()).
+		Get(ts.URL + "/")
+
+	assertError(t, err)
+	assertEqual(t, http.StatusOK, resp.StatusCode())
+	assertEqual(t, "200 OK", resp.Status())
+	assertEqual(t, true, resp.Body() != nil)
+	assertEqual(t, "TestGet: text response", resp.String())
+
+	logResponse(t, resp)
 }
 
 func getTestDataPath() string {

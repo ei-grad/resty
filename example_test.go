@@ -1,6 +1,7 @@
 package resty_test
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io/ioutil"
@@ -180,6 +181,21 @@ func ExampleClient_SetCertificates() {
 	}
 
 	resty.SetCertificates(cert)
+}
+
+//
+// Request object methods
+//
+func ExampleRequest_SetContext() {
+	ch := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		resp, err := resty.R().SetContext(ctx).Get("http://httpbin.org/delay/10")
+		printOutput(resp, err)
+		ch <- struct{}{}
+	}()
+	cancel()
+	<-ch
 }
 
 func printOutput(resp *resty.Response, err error) {
